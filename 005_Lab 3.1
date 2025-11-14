@@ -1,0 +1,267 @@
+## Lab 3.1: Document Processing Pipeline with LangGraph + ChatOpenAI
+
+---
+
+## Learning Objectives
+
+By the end of this lab, participants will be able to:
+
+1. Describe the role of a **state object** (`DocumentState`) in a LangGraph workflow for document processing.
+2. Implement and explain a **multi-step processing pipeline**: validation → cleaning → summarization → keyword extraction.
+3. Use an LLM (`ChatOpenAI`) to generate a **summary** and **keywords** from cleaned text.
+4. Configure a LangGraph with **conditional routing** to handle errors using an `error_handler` node.
+5. Compile and run the graph with `graph.invoke(...)` and interpret the returned state (e.g. `processed`, `summary`, `keywords`, `error`).
+6. Explain how simple validation and error-handling logic improves robustness in document-processing workflows.
+
+---
+
+## Step-by-Step Lab Guide (with Explanation)
+
+> Participants should **reuse the existing imports and setup** from earlier labs (e.g. `ChatOpenAI`, `StateGraph`, `END`, `Dict`, `Any`) and then add this code exactly as provided.
+
+---
+
+### Step 1 – Define the Processing Pipeline and State
+
+```python
+# Step 1: Define the processing pipeline
+class DocumentState(Dict[str, Any]):
+    raw_document: str
+    cleaned_text: str
+    summary: str
+    keywords: list
+    processed: bool
+    error: str
+
+def validate_input(state: DocumentState):
+    if not state["raw_document"] or len(state["raw_document"]) < 10:
+        return {"error": "Document too short"}
+    return {"error": None}
+
+def clean_document(state: DocumentState):
+    # Simple cleaning
+    cleaned = state["raw_document"].strip().replace('\n', ' ')
+    return {"cleaned_text": cleaned}
+
+def summarize_document(state: DocumentState):
+    llm = ChatOpenAI(model="gpt-3.5-turbo")
+    summary = llm.invoke(f"Summarize: {state['cleaned_text']}")
+    return {"summary": summary.content}
+
+def extract_keywords(state: DocumentState):
+    llm = ChatOpenAI(model="gpt-3.5-turbo")
+    keywords = llm.invoke(f"Extract 5 keywords from: {state['cleaned_text']}")
+    return {"keywords": keywords.content.split(', '), "processed": True}
+```
+
+#### What to do
+
+1. Paste all of the code above into a new cell in your notebook.
+2. Run the cell to define the `DocumentState` class and the four functions:
+
+   * `validate_input`
+   * `clean_document`
+   * `summarize_document`
+   * `extract_keywords`
+
+#### Explanation
+
+* **`DocumentState`**
+
+  * Extends `Dict[str, Any]` to describe what fields the pipeline will use:
+
+    * `raw_document`: the original text.
+    * `cleaned_text`: cleaned version of the text.
+    * `summary`: the generated summary.
+    * `keywords`: list of extracted keywords.
+    * `processed`: boolean flag indicating if the pipeline finished successfully.
+    * `error`: error message, if any.
+  * This state is passed from node to node and gradually enriched.
+
+* **`validate_input(state)`**
+
+  * Checks if `raw_document` is present and has at least 10 characters.
+  * If too short or missing → returns `{"error": "Document too short"}`.
+  * If valid → returns `{"error": None}`.
+  * This is the **first guardrail**: it prevents wasting LLM calls on invalid input.
+
+* **`clean_document(state)`**
+
+  * Applies simple text cleaning:
+
+    * `strip()` removes leading/trailing whitespace.
+    * `replace('\n', ' ')` converts line breaks into spaces to keep the text in one line.
+  * Returns `{"cleaned_text": cleaned}`.
+  * This prepares the text for summarization and keyword extraction.
+
+* **`summarize_document(state)`**
+
+  * Creates an LLM client: `ChatOpenAI(model="gpt-3.5-turbo")`.
+  * Sends a prompt: `"Summarize: {cleaned_text}"`.
+  * `summary = llm.invoke(...)` gets the summarization result.
+  * Returns `{"summary": summary.content}` to update the state.
+  * This step is responsible for the **document summary**.
+
+* **`extract_keywords(state)`**
+
+  * Uses the LLM again with prompt: `"Extract 5 keywords from: {cleaned_text}"`.
+  * Splits the result by `', '` to form a Python list.
+  * Returns:
+
+    * `"keywords"`: the list of extracted keywords.
+    * `"processed": True`: marks that the pipeline completed successfully.
+  * This step adds **structured metadata** (keywords) to the state.
+
+---
+
+### Step 2 – Build the Graph with Error Handling
+
+```python
+# Step 2: Build with error handling
+def route_after_validation(state: DocumentState):
+    if state.get("error"):
+        return "error_handler"
+    return "clean"
+
+def error_handler(state: DocumentState):
+    print(f"Error encountered: {state['error']}")
+    return {"processed": False}
+
+builder = StateGraph(DocumentState)
+builder.add_node("validate", validate_input)
+builder.add_node("clean", clean_document)
+builder.add_node("summarize", summarize_document)
+builder.add_node("extract_keywords", extract_keywords)
+builder.add_node("error_handler", error_handler)
+
+builder.set_entry_point("validate")
+builder.add_conditional_edges("validate", route_after_validation)
+builder.add_edge("clean", "summarize")
+builder.add_edge("summarize", "extract_keywords")
+builder.add_edge("extract_keywords", END)
+builder.add_edge("error_handler", END)
+```
+
+#### What to do
+
+1. Paste this block right after Step 1 in the same notebook.
+2. Run the cell to:
+
+   * Define `route_after_validation` and `error_handler`.
+   * Build and configure the graph structure with nodes and edges.
+
+#### Explanation
+
+* **`route_after_validation(state)`**
+
+  * Called right after the `validate` node.
+  * Checks `state.get("error")`:
+
+    * If there is any error message (e.g. `"Document too short"`), it returns `"error_handler"`.
+    * Otherwise, it returns `"clean"`.
+  * This function controls **which node runs next**, based on validation results.
+
+* **`error_handler(state)`**
+
+  * Prints the error message: `Error encountered: ...`.
+  * Returns `{"processed": False}`.
+  * This node centralizes error handling and ensures the pipeline marks the document as **not processed**.
+
+* **Graph construction**
+
+  * `builder = StateGraph(DocumentState)`: declares that this graph will use `DocumentState` as its state type.
+  * `add_node(...)` calls register:
+
+    * `"validate"` → validation step
+    * `"clean"` → text cleaning
+    * `"summarize"` → LLM summarization
+    * `"extract_keywords"` → LLM keyword extraction
+    * `"error_handler"` → handles invalid documents
+  * `set_entry_point("validate")`:
+
+    * The pipeline always starts with the validation step.
+  * `add_conditional_edges("validate", route_after_validation)`:
+
+    * After validation, use `route_after_validation` to decide next node:
+
+      * `"clean"` → continue the normal pipeline.
+      * `"error_handler"` → handle errors and stop.
+  * `add_edge("clean", "summarize")`:
+
+    * After cleaning, run summarization.
+  * `add_edge("summarize", "extract_keywords")`:
+
+    * After summarizing, extract keywords.
+  * `add_edge("extract_keywords", END)` and `add_edge("error_handler", END)`:
+
+    * Both successful and error paths end the pipeline.
+
+Overall flow (for valid input):
+
+`validate → clean → summarize → extract_keywords → END`
+
+Error flow (for invalid input):
+
+`validate → error_handler → END`
+
+---
+
+### Step 3 – Process a Sample Document
+
+```python
+# Step 3: Process documents
+graph = builder.compile()
+sample_doc = "Artificial intelligence is transforming healthcare through improved diagnostics..."
+result = graph.invoke({"raw_document": sample_doc})
+print("Processing complete:", result["processed"])
+print("Summary:", result["summary"])
+```
+
+#### What to do
+
+1. Paste this code in a new cell.
+2. Run the cell.
+
+#### What you should see
+
+* No errors if `ChatOpenAI` and your API key are correctly configured.
+* Console output similar to:
+
+  ```text
+  Processing complete: True
+  Summary: Artificial intelligence is transforming healthcare by improving diagnostics...
+  ```
+
+  (The exact summary text will vary, but should be a concise version of the sample document.)
+
+#### Explanation
+
+* `graph = builder.compile()`:
+
+  * Converts the graph definition into a runnable pipeline.
+* `sample_doc`:
+
+  * A short example text about AI in healthcare.
+  * Long enough to pass the validation (> 10 characters).
+* `graph.invoke({"raw_document": sample_doc})`:
+
+  * Starts the pipeline with a state that only has `raw_document`.
+  * The other fields (`cleaned_text`, `summary`, `keywords`, `processed`, `error`) are filled in step-by-step by the nodes.
+  * Internal flow:
+
+    1. `validate` checks length and sets `"error": None`.
+    2. `route_after_validation` sends the flow to `"clean"`.
+    3. `clean` creates `cleaned_text`.
+    4. `summarize` calls the LLM and fills `summary`.
+    5. `extract_keywords` calls the LLM again, fills `keywords`, and sets `processed = True`.
+    6. Pipeline ends at `END`.
+* `result`:
+
+  * The final state after all nodes have run.
+  * `result["processed"]` should be `True` for this valid document.
+  * `result["summary"]` contains the summary generated by the LLM.
+  * You can also inspect:
+
+    * `result["cleaned_text"]`
+    * `result["keywords"]`
+    * `result["error"]` (should be `None` here).
